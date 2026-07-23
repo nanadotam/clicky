@@ -133,6 +133,78 @@ The app will appear in your menu bar (not the dock). Click the icon to open the 
 - **Screen Recording** — for taking screenshots when you use the hotkey
 - **Screen Content** — for ScreenCaptureKit access
 
+## Running fully local (no cloud APIs)
+
+This fork adds a local-first path: the Worker still speaks the same
+Anthropic/ElevenLabs dialects on the outside (so the Swift app's networking
+code is untouched), but internally it can translate and forward to models
+running on your own Mac instead of any cloud API. No API keys, no per-token
+billing, nothing leaves your machine.
+
+**What's local right now:**
+
+| Piece | Cloud original | Local replacement |
+|---|---|---|
+| Chat + vision + pointing | Claude via Anthropic | [Ollama](https://ollama.com) — any local model whose name doesn't start with `claude-` is routed to Ollama's `/api/chat` instead. Tested with `qwen2.5vl:7b` and `llama3.2-vision:11b` (both vision-capable, needed for the screen-pointing feature). |
+| Text-to-speech | ElevenLabs | [Kokoro-82M](https://huggingface.co/mlx-community/Kokoro-82M-4bit) via [mlx-audio](https://github.com/Blaizzy/mlx-audio)'s OpenAI-compatible `/v1/audio/speech` server, running on Apple Silicon via MLX. |
+| Speech-to-text | AssemblyAI | Apple's on-device Speech framework — already built into this codebase (`AppleSpeechTranscriptionProvider.swift`) as a fallback provider, just needs selecting. |
+
+### Setup
+
+**1. Ollama** (chat/vision) — install from [ollama.com](https://ollama.com), then:
+```bash
+ollama pull qwen2.5vl:7b
+ollama pull llama3.2-vision:11b   # optional second option
+```
+Make sure `ollama serve` is running (the menu-bar app does this automatically).
+
+**2. Kokoro TTS** — needs Python 3.11 specifically; `misaki[en]`'s dependency
+chain (spaCy → thinc → blis) has no prebuilt wheel yet for 3.13 on macOS arm64:
+```bash
+python3.11 -m venv .venv-tts
+source .venv-tts/bin/activate
+pip install "mlx-audio[server]" "misaki[en]"
+python3 -m mlx_audio.server --host 127.0.0.1 --port 8000
+```
+
+**3. Worker, running locally instead of deployed to Cloudflare:**
+```bash
+cd worker
+npm install
+npx wrangler telemetry disable   # skips an interactive first-run prompt
+cp .dev.vars.example .dev.vars   # then fill in LOCAL_TTS=true etc — see below
+npx wrangler dev --port 8787
+```
+
+Your `worker/.dev.vars` (gitignored, never committed) needs:
+```
+ANTHROPIC_API_KEY=
+ASSEMBLYAI_API_KEY=
+ELEVENLABS_API_KEY=
+OLLAMA_BASE_URL=http://localhost:11434
+LOCAL_TTS=true
+KOKORO_BASE_URL=http://localhost:8000
+KOKORO_VOICE=af_heart
+```
+(The three cloud keys can stay blank — they're only read if you deliberately
+select a `claude-*` model or set `LOCAL_TTS=false`.)
+
+**4. Swift app** — `CompanionManager.swift`'s `workerBaseURL` already points
+at `http://localhost:8787` and `selectedModel` already defaults to
+`"qwen2.5vl:7b"` in this fork. Open in Xcode and run as usual (see below).
+
+### Why this works without touching the Swift networking code
+
+`ClaudeAPI.swift` and `ElevenLabsTTSClient.swift` only know how to speak one
+dialect each (Anthropic's SSE format, ElevenLabs' request shape). Rather than
+teach the Swift app two dialects per capability, all the translation lives
+in one place — `worker/src/index.ts` — which is the only thing that knows
+both sides. `/chat` translates Anthropic's request/SSE shape to/from
+Ollama's `/api/chat` shape; `/tts` translates ElevenLabs' `{text, model_id,
+voice_settings}` to Kokoro's OpenAI-compatible `{model, input, voice}` (and
+Kokoro conveniently also returns MP3, so no re-encoding is needed either).
+The Swift app genuinely cannot tell the difference.
+
 ## Architecture
 
 If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:

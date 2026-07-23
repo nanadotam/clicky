@@ -1,0 +1,16 @@
+# Copy to .dev.vars (gitignored, never committed) and fill in as needed.
+#
+# For fully-local use, the three cloud keys can stay blank — they're only
+# read if you deliberately select a "claude-*" model or set LOCAL_TTS=false.
+ANTHROPIC_API_KEY=
+ASSEMBLYAI_API_KEY=
+ELEVENLABS_API_KEY=
+
+# Where Ollama is listening (chat/vision routing — see README's
+# "Running fully local" section).
+OLLAMA_BASE_URL=http://localhost:11434
+
+# Set to "true" to route /tts to a local Kokoro server instead of ElevenLabs.
+LOCAL_TTS=true
+KOKORO_BASE_URL=http://localhost:8000
+KOKORO_VOICE=af_heart

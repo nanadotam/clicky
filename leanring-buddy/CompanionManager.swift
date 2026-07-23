@@ -68,9 +68,15 @@ final class CompanionManager: ObservableObject {
     // Response text is now displayed inline on the cursor overlay via
     // streamingResponseText, so no separate response overlay manager is needed.
 
-    /// Base URL for the Cloudflare Worker proxy. All API requests route
-    /// through this so keys never ship in the app binary.
-    private static let workerBaseURL = "https://your-worker-name.your-subdomain.workers.dev"
+    /// Base URL for the Worker proxy. All API requests route through this
+    /// so keys never ship in the app binary.
+    ///
+    /// Set to the local `wrangler dev` server (see worker/README or the
+    /// root README's "Running fully local" section) — this build talks to
+    /// on-device Ollama (chat/vision) and Kokoro (TTS) through it instead
+    /// of the deployed Cloudflare Worker. Point this back at your deployed
+    /// Worker URL if you want cloud Claude/ElevenLabs instead.
+    private static let workerBaseURL = "http://localhost:8787"
 
     private lazy var claudeAPI: ClaudeAPI = {
         return ClaudeAPI(proxyURL: "\(Self.workerBaseURL)/chat", model: selectedModel)
@@ -107,8 +113,12 @@ final class CompanionManager: ObservableObject {
     /// Used by the panel to show accurate status text ("Active" vs "Ready").
     @Published private(set) var isOverlayVisible: Bool = false
 
-    /// The Claude model used for voice responses. Persisted to UserDefaults.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "claude-sonnet-4-6"
+    /// The model used for voice responses — a Claude model name (routed to
+    /// Anthropic) or a local Ollama tag like "qwen2.5vl:7b" (routed to Ollama
+    /// by the Worker; see worker/src/index.ts's handleChat routing rule).
+    /// Persisted to UserDefaults. Defaults to a local model since this fork
+    /// is set up for local-first use — see the root README.
+    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "qwen2.5vl:7b"
 
     func setSelectedModel(_ model: String) {
         selectedModel = model
