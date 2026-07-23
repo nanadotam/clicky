@@ -77,6 +77,17 @@ async function handleChat(request: Request, env: Env): Promise<Response> {
   const bodyText = await request.text();
   const anthropicRequest = JSON.parse(bodyText) as AnthropicChatRequest;
 
+  // Without this, a malformed request (missing `model`/`messages`) throws an
+  // unhelpful TypeError deep inside handleOllamaChat (e.g.
+  // `anthropicRequest.model.startsWith` on undefined) that the outer
+  // try/catch turns into an opaque 500. Fail fast with a clear message.
+  if (typeof anthropicRequest.model !== "string" || !Array.isArray(anthropicRequest.messages)) {
+    return new Response(
+      JSON.stringify({ error: "Request body must include a string `model` and an array `messages`." }),
+      { status: 400, headers: { "content-type": "application/json" } }
+    );
+  }
+
   // Routing rule: any model name that isn't a Claude model is treated as a
   // local Ollama model tag (e.g. "qwen2.5vl:7b", "llama3.2-vision:11b").
   // Anthropic's own model names all start with "claude-", so this needs no
@@ -271,7 +282,20 @@ function translateOllamaStreamToAnthropicSSE(ollamaBody: ReadableStream<Uint8Arr
 
         for (const line of lines) {
           if (!line.trim()) continue;
-          const ollamaEvent = JSON.parse(line) as { message?: { content?: string }; done?: boolean };
+
+          // A malformed/truncated line here must not throw: an uncaught
+          // exception inside a TransformStream's transform() aborts the
+          // whole stream, which would cut the user's response off mid-
+          // sentence with no clear error. Skip the bad line and keep going
+          // instead — one bad chunk shouldn't lose the rest of the reply.
+          let ollamaEvent: { message?: { content?: string }; done?: boolean };
+          try {
+            ollamaEvent = JSON.parse(line);
+          } catch (parseError) {
+            console.warn(`[/chat] Skipping unparseable Ollama stream line: ${line}`, parseError);
+            continue;
+          }
+
           const textChunk = ollamaEvent.message?.content;
           if (textChunk) {
             const anthropicEvent = {
