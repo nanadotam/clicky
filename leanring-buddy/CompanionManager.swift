@@ -114,11 +114,20 @@ final class CompanionManager: ObservableObject {
     @Published private(set) var isOverlayVisible: Bool = false
 
     /// The model used for voice responses — a Claude model name (routed to
-    /// Anthropic) or a local Ollama tag like "qwen2.5vl:7b" (routed to Ollama
-    /// by the Worker; see worker/src/index.ts's handleChat routing rule).
-    /// Persisted to UserDefaults. Defaults to a local model since this fork
-    /// is set up for local-first use — see the root README.
-    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "qwen2.5vl:7b"
+    /// Anthropic), an Ollama Cloud tag like "gemma4:cloud", or a fully local
+    /// Ollama tag like "llama3.2-vision:11b". All non-"claude-*" names route
+    /// to Ollama via the Worker (see worker/src/index.ts's handleChat).
+    /// Persisted to UserDefaults.
+    ///
+    /// Defaults to "gemma4:cloud": in a real benchmark against the same
+    /// screenshot, it answered in ~9s with the on-screen text (song title
+    /// AND artist) fully correct — faster and more accurate than any local
+    /// model tested (qwen2.5vl:7b, llama3.2-vision:11b — see
+    /// docs/vision-model-benchmark.md). If gemma4:cloud's free-tier quota
+    /// is exhausted, the Worker automatically retries against FALLBACK_MODEL
+    /// (llama3.2-vision:11b by default) instead of failing outright — see
+    /// handleOllamaChat's cloud-with-local-fallback logic.
+    @Published var selectedModel: String = UserDefaults.standard.string(forKey: "selectedClaudeModel") ?? "gemma4:cloud"
 
     func setSelectedModel(_ model: String) {
         selectedModel = model

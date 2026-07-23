@@ -30,6 +30,9 @@ interface Env {
   ASSEMBLYAI_API_KEY: string;
   /** e.g. "http://localhost:11434" — where the Ollama daemon is listening. */
   OLLAMA_BASE_URL?: string;
+  /** Local model to retry with when the requested (often cloud) model is
+   *  quota/subscription-rejected. Must be a model that runs fully locally. */
+  FALLBACK_MODEL?: string;
   /** "true" to route /tts to the local Kokoro server instead of ElevenLabs. */
   LOCAL_TTS?: string;
   /** e.g. "http://localhost:8000" — where `mlx_audio.server` is listening. */
@@ -169,16 +172,28 @@ function toOllamaMessage(message: AnthropicMessage): OllamaMessage {
 }
 
 /**
- * Handles /chat requests whose model is a local Ollama tag. Translates the
+ * Handles /chat requests whose model is an Ollama tag — either a local model
+ * or an Ollama Cloud model (e.g. "gemma4:cloud"). Translates the
  * Anthropic-shaped request into Ollama's /api/chat format, forwards it to
- * the Ollama daemon running on this machine, and — for streaming requests —
+ * the Ollama daemon running on this machine (which itself proxies to the
+ * cloud for "-cloud"/":cloud" tags), and — for streaming requests —
  * re-emits Ollama's response as Anthropic-style SSE `content_block_delta`
  * events so ClaudeAPI.swift's existing parser (built for real Claude) can
  * read it without any changes.
+ *
+ * Cloud-with-local-fallback: if the requested model is rejected with 403
+ * (subscription required) or 429 (quota exceeded) — the two ways Ollama
+ * Cloud signals "can't serve this right now" — this retries once against
+ * FALLBACK_MODEL (a model guaranteed to run locally) instead of surfacing
+ * the error. This makes the cloud model's free-tier quota a soft ceiling:
+ * once it's hit, requests keep working, just slower, until the quota
+ * resets (session limit every 5h, weekly limit every 7 days per Ollama's
+ * pricing page) rather than the app just breaking.
  */
 async function handleOllamaChat(anthropicRequest: AnthropicChatRequest, env: Env): Promise<Response> {
   const ollamaBaseURL = env.OLLAMA_BASE_URL || "http://localhost:11434";
   const isStreaming = anthropicRequest.stream ?? false;
+  const fallbackModel = env.FALLBACK_MODEL || "llama3.2-vision:11b";
 
   const ollamaMessages: OllamaMessage[] = [];
   if (anthropicRequest.system) {
@@ -186,15 +201,25 @@ async function handleOllamaChat(anthropicRequest: AnthropicChatRequest, env: Env
   }
   ollamaMessages.push(...anthropicRequest.messages.map(toOllamaMessage));
 
-  const ollamaResponse = await fetch(`${ollamaBaseURL}/api/chat`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      model: anthropicRequest.model,
-      messages: ollamaMessages,
-      stream: isStreaming,
-    }),
-  });
+  async function callOllama(model: string): Promise<Response> {
+    return fetch(`${ollamaBaseURL}/api/chat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model, messages: ollamaMessages, stream: isStreaming }),
+    });
+  }
+
+  let ollamaResponse = await callOllama(anthropicRequest.model);
+
+  const isQuotaOrSubscriptionError = ollamaResponse.status === 403 || ollamaResponse.status === 429;
+  if (!ollamaResponse.ok && isQuotaOrSubscriptionError && anthropicRequest.model !== fallbackModel) {
+    const errorBody = await ollamaResponse.text();
+    console.warn(
+      `[/chat] "${anthropicRequest.model}" unavailable (${ollamaResponse.status}): ${errorBody}. ` +
+      `Falling back to local model "${fallbackModel}".`
+    );
+    ollamaResponse = await callOllama(fallbackModel);
+  }
 
   if (!ollamaResponse.ok) {
     const errorBody = await ollamaResponse.text();

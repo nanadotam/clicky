@@ -10,6 +10,10 @@ ELEVENLABS_API_KEY=
 # "Running fully local" section).
 OLLAMA_BASE_URL=http://localhost:11434
 
+# Local model to fall back to when the requested model (e.g. a cloud model
+# like "gemma4:cloud") is quota/subscription-rejected (403/429).
+FALLBACK_MODEL=llama3.2-vision:11b
+
 # Set to "true" to route /tts to a local Kokoro server instead of ElevenLabs.
 LOCAL_TTS=true
 KOKORO_BASE_URL=http://localhost:8000
