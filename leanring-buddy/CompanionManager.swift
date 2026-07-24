@@ -65,8 +65,11 @@ final class CompanionManager: ObservableObject {
     let buddyDictationManager = BuddyDictationManager()
     let globalPushToTalkShortcutMonitor = GlobalPushToTalkShortcutMonitor()
     let overlayWindowManager = OverlayWindowManager()
-    // Response text is now displayed inline on the cursor overlay via
-    // streamingResponseText, so no separate response overlay manager is needed.
+    /// Cursor-following text bubble (CompanionResponseOverlay.swift). Used
+    /// during `.processing` to show what's actually happening — connecting,
+    /// which model, or a connection failure — instead of a bare spinner with
+    /// no context, which is otherwise indistinguishable from "just slow."
+    let statusOverlayManager = CompanionResponseOverlayManager()
 
     /// Base URL for the Worker proxy. All API requests route through this
     /// so keys never ship in the app binary.
@@ -609,12 +612,16 @@ final class CompanionManager: ObservableObject {
         currentResponseTask = Task {
             // Stay in processing (spinner) state — no streaming text displayed
             voiceState = .processing
+            statusOverlayManager.showOverlayAndBeginStreaming()
+            statusOverlayManager.updateStreamingText("Capturing your screen…")
 
             do {
                 // Capture all connected screens so the AI has full context
                 let screenCaptures = try await CompanionScreenCaptureUtility.captureAllScreensAsJPEG()
 
                 guard !Task.isCancelled else { return }
+
+                statusOverlayManager.updateStreamingText("Asking \(selectedModel)…")
 
                 // Build image labels with the actual screenshot pixel dimensions
                 // so Claude's coordinate space matches the image it sees. We
@@ -716,6 +723,12 @@ final class CompanionManager: ObservableObject {
 
                 ClickyAnalytics.trackAIResponseReceived(response: spokenText)
 
+                // Response is ready — the status bubble ("Asking...") has done
+                // its job; hide it before TTS starts rather than showing the
+                // spoken text as well (that's an intentional existing design
+                // choice — audio-only responses, minimal visual clutter).
+                statusOverlayManager.hideOverlay()
+
                 // Play the response via TTS. Keep the spinner (processing state)
                 // until the audio actually starts playing, then switch to responding.
                 if !spokenText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -725,8 +738,8 @@ final class CompanionManager: ObservableObject {
                         voiceState = .responding
                     } catch {
                         ClickyAnalytics.trackTTSError(error: error.localizedDescription)
-                        print("⚠️ ElevenLabs TTS error: \(error)")
-                        speakCreditsErrorFallback()
+                        print("⚠️ TTS error: \(error)")
+                        speakConnectionErrorFallback(error)
                     }
                 }
             } catch is CancellationError {
@@ -734,7 +747,7 @@ final class CompanionManager: ObservableObject {
             } catch {
                 ClickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
-                speakCreditsErrorFallback()
+                speakConnectionErrorFallback(error)
             }
 
             if !Task.isCancelled {
@@ -777,8 +790,32 @@ final class CompanionManager: ObservableObject {
     /// Speaks a hardcoded error message using macOS system TTS when API
     /// credits run out. Uses NSSpeechSynthesizer so it works even when
     /// ElevenLabs is down.
-    private func speakCreditsErrorFallback() {
-        let utterance = "I'm all out of credits. Please DM Farza and tell him to bring me back to life."
+    /// Speaks (and shows, via the status bubble) a message appropriate to
+    /// what actually went wrong, instead of a generic "out of credits" line
+    /// that no longer makes sense once local models are in the mix — there's
+    /// no credits concept for Ollama, and the real cause is far more likely
+    /// to be "Ollama isn't running" or "no internet" than a billing issue.
+    ///
+    /// Distinguishes connectivity failures (URLError — the Worker, Ollama,
+    /// or Kokoro unreachable) from other errors (e.g. a real error response
+    /// body from the model itself) since the fix is different for each: a
+    /// connectivity failure means check your local services are running;
+    /// anything else means read the actual error.
+    private func speakConnectionErrorFallback(_ error: Error) {
+        let isConnectivityFailure: Bool = {
+            guard let urlError = error as? URLError else { return false }
+            return [.notConnectedToInternet, .cannotConnectToHost, .networkConnectionLost, .timedOut]
+                .contains(urlError.code)
+        }()
+
+        let utterance = isConnectivityFailure
+            ? "Hmm, I can't reach the model right now. Check that Ollama and the local worker are running, then press Control Option to try again."
+            : "Hmm, something went wrong reaching the model. Press Control Option to try again."
+
+        statusOverlayManager.showOverlayAndBeginStreaming()
+        statusOverlayManager.updateStreamingText(utterance)
+        statusOverlayManager.finishStreaming() // auto-hides after a few seconds
+
         let synthesizer = NSSpeechSynthesizer()
         synthesizer.startSpeaking(utterance)
         voiceState = .responding
